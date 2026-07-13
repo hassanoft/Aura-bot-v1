@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const path = require("path");
 const fs = require("fs");
 const pino = require("pino");
@@ -6,9 +8,9 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  makeCacheableSignalKeyStore
+  makeCacheableSignalKeyStore,
+  fetchLatestBaileysVersion
 } = require("@whiskeysockets/baileys");
-
 
 const config = require("./config");
 const logger = require("./utils/logger");
@@ -18,1101 +20,459 @@ const { loadCommands } = require("./utils/commandLoader");
 const { loadEvents } = require("./utils/eventLoader");
 const { createServer } = require("./server");
 
+// ===============================
+// CONFIG TERMUX
+// ===============================
 
-
+// Stocker la session dans un dossier persistant
 const SESSION_DIR = path.resolve(
-  config.paths.session
+  process.env.SESSION_DIR || 
+  path.join("/data/data/com.termux/files/home/.aura-session")
 );
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-
-const delay = ms =>
-new Promise(resolve =>
-setTimeout(resolve, ms)
-);
-
-
-
-// Version WhatsApp fixe pour Render
-const WA_VERSION = [
-  2,
-  3000,
-  1015901307
-];
-
-
+// Version WhatsApp
+let WA_VERSION = [2, 3000, 1015901307];
 
 // ===============================
-// ETAT DU BOT
+// ÉTAT DU BOT
 // ===============================
 
 const state = {
-
-  connected:false,
-
-  lastConnectedAt:null,
-
-  usersCount(){
+  connected: false,
+  lastConnectedAt: null,
+  usersCount() {
     return Object.keys(db.users.all()).length;
   },
-
-  groupsCount(){
+  groupsCount() {
     return Object.keys(db.groups.all()).length;
   }
-
 };
 
-
-
 const commands = loadCommands();
-
-
 
 let sock = null;
 let authState = null;
 let saveCreds = null;
-
-
 let reconnecting = false;
 let pairingRunning = false;
 let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 100; // Plus élevé pour Termux
 
-const MAX_RECONNECT_ATTEMPTS = 20;
+// ===============================
+// ANIMATION DÉMARRAGE
+// ===============================
 
-
-
+function showBanner() {
+  console.log(`
+╔══════════════════════════════════════╗
+║        🤖 AURA BOT - TERMUX         ║
+║         WhatsApp Bot 24/7            ║
+╚══════════════════════════════════════╝
+`);
+}
 
 // ===============================
 // START WHATSAPP
 // ===============================
 
-async function startBot(){
-
-
-  try{
-
-
-    // Vérifier trop de tentatives
-    if(reconnectAttempts >= MAX_RECONNECT_ATTEMPTS){
-
-
-      logger.error(
-        "Trop de tentatives de reconnexion"
-      );
-
-
-      logger.info(
-        "Processus maintenu pour health check Render"
-      );
-
-
+async function startBot() {
+  try {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      logger.error("❌ Trop de tentatives");
+      logger.info("⏰ Reset automatique dans 10 minutes...");
+      
+      setTimeout(() => {
+        reconnectAttempts = 0;
+        reconnecting = false;
+        logger.info("🔄 Reprise des tentatives...");
+        startBot();
+      }, 600000);
+      
       return;
-
-
     }
 
-
-
-
-    if(!fs.existsSync(SESSION_DIR)){
-
-      fs.mkdirSync(
-        SESSION_DIR,
-        {
-          recursive:true
-        }
-      );
-
-      logger.info(
-        "Dossier session créé"
-      );
-
+    // Créer le dossier de session
+    if (!fs.existsSync(SESSION_DIR)) {
+      fs.mkdirSync(SESSION_DIR, { recursive: true });
+      logger.info("📁 Session: " + SESSION_DIR);
     }
 
-
-
-    const auth =
-    await useMultiFileAuthState(
-      SESSION_DIR
-    );
-
-
-
+    const auth = await useMultiFileAuthState(SESSION_DIR);
     authState = auth.state;
     saveCreds = auth.saveCreds;
 
-
-
-
-    if(authState.creds.registered){
-
-
-      logger.success(
-        "Session existante trouvée"
-      );
-
-
-    }else{
-
-
-      logger.info(
-        "Nouvelle session - utilisez API pairing"
-      );
-
-
+    // Essayer de récupérer la dernière version
+    try {
+      const { version } = await fetchLatestBaileysVersion();
+      WA_VERSION = version;
+      logger.info("📱 WhatsApp v" + version.join("."));
+    } catch (e) {
+      logger.warn("⚠️ Version fallback: " + WA_VERSION.join("."));
     }
 
+    if (authState.creds.registered) {
+      logger.success("✅ Session existante - Reconnexion auto");
+    } else {
+      logger.info("🆕 Nouvelle session");
+      logger.info("💡 Scannez le QR code qui va s'afficher");
+      logger.info("   Ou utilisez le pairing code via l'API");
+    }
 
-
-
-    logger.info(
-      "Version WhatsApp : "+
-      WA_VERSION.join(".")
-    );
-
-
-
-
-    sock =
-    makeWASocket({
-
-      version:WA_VERSION,
-
-      auth:{
-        creds:authState.creds,
-        keys:makeCacheableSignalKeyStore(
+    sock = makeWASocket({
+      version: WA_VERSION,
+      auth: {
+        creds: authState.creds,
+        keys: makeCacheableSignalKeyStore(
           authState.keys,
-          pino({level:"silent"})
+          pino({ level: "silent" })
         )
       },
-
-
-      browser:[
-        "AURA BOT",
-        "Chrome",
-        "10.0.0"
-      ],
-
-
-      logger:pino({
-        level:"silent"
-      }),
-
-
-      printQRInTerminal:false,
-
-
-      connectTimeoutMs:120000,
-
-
-      keepAliveIntervalMs:30000,
-
-
-      markOnlineOnConnect:false,
-
-
-      defaultQueryTimeoutMs:60000,
-
-
-      syncFullHistory:false,
-
-
-      retryRequestDelayMs:10000
-
+      browser: ["AURA BOT", "Chrome", "10.0.0"],
+      logger: pino({ level: "silent" }),
+      printQRInTerminal: !process.env.DISABLE_QR,
+      connectTimeoutMs: 120000,
+      keepAliveIntervalMs: 30000,
+      markOnlineOnConnect: true,
+      defaultQueryTimeoutMs: 60000,
+      syncFullHistory: false,
+      retryRequestDelayMs: 10000,
+      emitOwnEvents: true,
+      generateHighQualityLinkPreview: true
     });
 
-
-
-
-    sock.ev.on(
-      "creds.update",
-      saveCreds
-    );
-
-
-
-
+    sock.ev.on("creds.update", saveCreds);
 
     const context = {
-
-
       commands,
-
-
       state,
-
-
-      reconnect:startBot,
-
-
-      clearSession:deleteSession
-
-
+      reconnect: startBot,
+      clearSession: deleteSession
     };
 
-
-
-
-
-    loadEvents(
-      sock,
-      context
-    );
-
-
-
-
-
-
-
-    sock.ev.on(
-      "connection.update",
-      async(update)=>{
-
-
-        const {
-          connection,
-          lastDisconnect
-        } = update;
-
-
-
-
-
-        if(connection==="connecting"){
-
-
-          logger.info(
-            "Connexion WhatsApp..."
-          );
-
-
-        }
-
-
-
-
-
-
-        if(connection==="open"){
-
-
-          state.connected=true;
-
-
-          state.lastConnectedAt =
-          new Date();
-
-
-          reconnectAttempts = 0;
-
-
-          reconnecting = false;
-
-
-
-          const botNumber =
-          sock.user?.id?.split(":")[0] ||
-          "Inconnu";
-
-
-
-          logger.success(
-            "✅ WhatsApp connecté"
-          );
-
-
-          logger.info(
-            "Numéro : "+botNumber
-          );
-
-
-        }
-
-
-
-
-
-
-
-
-        if(connection==="close"){
-
-
-
-          state.connected=false;
-
-
-
-          const code =
-          lastDisconnect
-          ?.error
-          ?.output
-          ?.statusCode;
-
-
-
-          const erreur =
-          lastDisconnect
-          ?.error
-          ?.message ||
-          "Inconnue";
-
-
-
-          logger.warn(
-            "Déconnecté - Code: "+
-            code
-          );
-
-
-          logger.warn(
-            "Raison: "+erreur
-          );
-
-
-
-
-
-          // Si loggedOut
-          if(
-            code === DisconnectReason.loggedOut
-          ){
-
-
-            logger.error(
-              "Session invalide - loggedOut"
-            );
-
-
-            deleteSession();
-
-
-            reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
-
-
-            return;
-
-
-          }
-
-
-
-
-
-          // Reconnexion automatique
-          if(
-            !reconnecting &&
-            reconnectAttempts < MAX_RECONNECT_ATTEMPTS
-          ){
-
-
-            reconnecting=true;
-
-
-            reconnectAttempts++;
-
-
-
-            const waitTime =
-            Math.min(
-              5000 * reconnectAttempts,
-              30000
-            );
-
-
-
-            logger.info(
-              "Reconnexion "+
-              reconnectAttempts+
-              "/"+
-              MAX_RECONNECT_ATTEMPTS+
-              " dans "+
-              waitTime/1000+
-              "s..."
-            );
-
-
-
-            await delay(waitTime);
-
-
-
-            try{
-              sock?.end();
-            }catch(e){}
-
-
-
-            sock = null;
-
-
-            reconnecting = false;
-
-
-
-            startBot();
-
-
-
-          }
-
-
-
-        }
-
-
-
+    loadEvents(sock, context);
+
+    // Gestion connexion
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      // Afficher QR code
+      if (qr && !authState.creds.registered) {
+        logger.info("📱 QR Code prêt ! Scannez avec WhatsApp");
       }
 
-    );
+      if (connection === "connecting") {
+        logger.info("🔌 Connexion...");
+      }
 
+      if (connection === "open") {
+        state.connected = true;
+        state.lastConnectedAt = new Date();
+        reconnectAttempts = 0;
+        reconnecting = false;
 
+        const botNumber = sock.user?.id?.split(":")[0] || "Inconnu";
+        
+        logger.success("✅ Connecté !");
+        logger.info("📞 +" + botNumber);
+        logger.info("👥 " + state.usersCount() + " utilisateurs");
+        logger.info("👥 " + state.groupsCount() + " groupes");
+        logger.info("⏰ " + state.lastConnectedAt.toLocaleString());
+        
+        // Notification Termux (optionnel)
+        if (process.env.TERMUX_NOTIFICATION === "true") {
+          require("child_process").exec(
+            `termux-notification --title "Aura Bot" --content "Connecté à WhatsApp" --priority high`
+          );
+        }
+      }
 
+      if (connection === "close") {
+        state.connected = false;
 
+        const code = lastDisconnect?.error?.output?.statusCode;
+        const erreur = lastDisconnect?.error?.message || "Inconnue";
+
+        logger.warn("🔌 Déconnecté");
+        logger.warn("📊 Code: " + (code || "N/A"));
+        logger.warn("💬 " + erreur);
+
+        if (code === DisconnectReason.loggedOut) {
+          logger.error("🚫 Session invalidée");
+          logger.info("💡 Supprimez " + SESSION_DIR + " et redémarrez");
+          deleteSession();
+          reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+          
+          if (process.env.TERMUX_NOTIFICATION === "true") {
+            require("child_process").exec(
+              `termux-notification --title "Aura Bot" --content "⚠️ Session invalidée" --priority urgent`
+            );
+          }
+          return;
+        }
+
+        // Reconnexion
+        if (!reconnecting && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          reconnecting = true;
+          reconnectAttempts++;
+
+          const waitTime = Math.min(5000 * reconnectAttempts, 60000);
+
+          logger.info(
+            "🔄 Reconnexion " +
+            reconnectAttempts + "/" + MAX_RECONNECT_ATTEMPTS +
+            " dans " + waitTime / 1000 + "s"
+          );
+
+          await delay(waitTime);
+
+          try { sock?.end(); } catch (e) {}
+          sock = null;
+          reconnecting = false;
+
+          await startBot();
+        }
+      }
+    });
 
     return sock;
 
-
-
-  }catch(error){
-
-
-
-    logger.error(
-      "Erreur démarrage bot : "+
-      error.message
-    );
-
-
-
+  } catch (error) {
+    logger.error("❌ Erreur: " + error.message);
     await delay(10000);
-
-
-    if(!reconnecting){
-
-
-      return startBot();
-
-
-    }
-
-
-
+    if (!reconnecting) return startBot();
   }
-
-
 }
-
-
-
-
-
 
 // ===============================
 // PAIRING CODE
 // ===============================
 
-async function requestPairingCode(number){
-
-
-
-  if(pairingRunning){
-
-    throw new Error(
-      "Pairing déjà en cours"
-    );
-
+async function requestPairingCode(number) {
+  if (pairingRunning) {
+    throw new Error("⏳ Pairing en cours");
   }
 
+  pairingRunning = true;
 
+  try {
+    const phone = number.replace(/\D/g, "");
 
-  pairingRunning=true;
-
-
-
-  try{
-
-
-
-    const phone =
-    number.replace(/\D/g,"");
-
-
-
-
-    if(phone.length < 10){
-
-
-      throw new Error(
-        "Numéro de téléphone invalide"
-      );
-
-
+    if (phone.length < 10) {
+      throw new Error("❌ Numéro invalide");
     }
 
+    logger.info("📱 Pairing pour: +" + phone);
 
-
-
-    logger.info(
-      "Demande pairing pour : "+phone
-    );
-
-
-
-
-    if(!sock){
-
-
-      logger.info(
-        "Initialisation du socket..."
-      );
-
-
+    if (!sock) {
       await startBot();
-
-
-
-      // Attendre que le socket soit prêt
+      
       let tentatives = 0;
-
-
-      while(
-        (!sock || !authState) &&
-        tentatives < 30
-      ){
-
-
+      while ((!sock || !authState) && tentatives < 30) {
         await delay(2000);
-
-
         tentatives++;
-
-
-        logger.info(
-          "Attente... ("+
-          tentatives+
-          "/30)"
-        );
-
-
       }
 
-
-
-      if(!sock || !authState){
-
-
-        throw new Error(
-          "Impossible d'initialiser le socket"
-        );
-
-
+      if (!sock || !authState) {
+        throw new Error("❌ Socket non initialisé");
       }
-
-
-
     }
 
-
-
-
-
-    if(authState?.creds?.registered){
-
-
-      logger.warn(
-        "Session déjà connectée"
-      );
-
-
-
-      return{
-        success:true,
-        message:"Session déjà connectée",
-        alreadyConnected:true
+    if (authState?.creds?.registered) {
+      return {
+        success: true,
+        message: "Déjà connecté",
+        alreadyConnected: true
       };
-
-
     }
-
-
-
-
 
     await delay(3000);
+    const code = await sock.requestPairingCode(phone);
+    const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
 
+    logger.success("══════════════════════");
+    logger.success("📲 CODE: " + formattedCode);
+    logger.success("══════════════════════");
+    logger.info("1. WhatsApp > Appareils connectés");
+    logger.info("2. Lier un appareil");
+    logger.info("3. Entrez: " + formattedCode);
+    logger.info("⏰ Expire dans 2 min");
 
-
-
-    logger.info(
-      "Demande du code pairing..."
-    );
-
-
-
-
-
-
-    const code =
-    await sock.requestPairingCode(
-      phone
-    );
-
-
-
-    const formattedCode =
-    code?.match(/.{1,4}/g)?.join("-") ||
-    code;
-
-
-
-
-    logger.success(
-      "══════════════════════════════"
-    );
-
-
-    logger.success(
-      "📲 CODE PAIRING : "+formattedCode
-    );
-
-
-    logger.success(
-      "══════════════════════════════"
-    );
-
-
-    logger.info(
-      "1. WhatsApp > Appareils connectés"
-    );
-
-
-    logger.info(
-      "2. Lier un appareil"
-    );
-
-
-    logger.info(
-      "3. Entrez le code"
-    );
-
-
-    logger.info(
-      "⏰ Code expire dans 2 minutes"
-    );
-
-
-
-
-    return{
-      success:true,
-      code:code,
-      formattedCode:formattedCode,
-      phone:phone
+    return {
+      success: true,
+      code: code,
+      formattedCode: formattedCode,
+      phone: phone
     };
 
-
-
-
-  }catch(error){
-
-
-
-    logger.error(
-      "Erreur pairing : "+
-      error.message
-    );
-
-
+  } catch (error) {
+    logger.error("❌ Erreur: " + error.message);
     throw error;
-
-
-
-  }finally{
-
-
-    pairingRunning=false;
-
-
+  } finally {
+    pairingRunning = false;
   }
-
-
-
 }
-
-
-
-
-
-
 
 // ===============================
 // RESTART
 // ===============================
 
-async function restart(){
-
-
-
-  logger.info(
-    "Redémarrage..."
-  );
-
-
-
-  try{
-
-
-    if(sock){
-
-      sock.end();
-
-    }
-
-
-  }catch(e){}
-
-
-
-
-
-  sock=null;
-
-
-  reconnecting=false;
-
-
-  reconnectAttempts=0;
-
-
-
+async function restart() {
+  logger.info("🔄 Redémarrage...");
+  try { sock?.end(); } catch (e) {}
+  sock = null;
+  reconnecting = false;
+  reconnectAttempts = 0;
   await delay(3000);
-
-
-
-  startBot();
-
-
-
+  await startBot();
 }
-
-
-
-
-
 
 // ===============================
 // DELETE SESSION
 // ===============================
 
-function deleteSession(){
-
-
-
-  logger.warn(
-    "Suppression session..."
-  );
-
-
-
-  try{
-
-
-    if(fs.existsSync(SESSION_DIR)){
-
-
-      fs.rmSync(
-        SESSION_DIR,
-        {
-          recursive:true,
-          force:true
-        }
-      );
-
-
+function deleteSession() {
+  logger.warn("🗑️ Suppression session...");
+  try {
+    if (fs.existsSync(SESSION_DIR)) {
+      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
     }
-
-
-
-
-    fs.mkdirSync(
-      SESSION_DIR,
-      {
-        recursive:true
-      }
-    );
-
-
-
-    state.connected=false;
-
-
-    sock=null;
-
-
-    authState=null;
-
-
-
-    logger.success(
-      "Session supprimée"
-    );
-
-
-
-  }catch(error){
-
-
-    logger.error(
-      "Erreur suppression : "+
-      error.message
-    );
-
-
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
+    state.connected = false;
+    sock = null;
+    authState = null;
+    logger.success("✅ Session supprimée");
+  } catch (error) {
+    logger.error("❌ Erreur: " + error.message);
   }
-
-
-
 }
 
-
-
-
-
-
 // ===============================
-// ANTI CRASH
+// STATUT
 // ===============================
 
+function getStatus() {
+  const os = require("os");
+  return {
+    connected: state.connected,
+    uptime: process.uptime(),
+    platform: "termux",
+    android: os.release(),
+    memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + "MB",
+    users: state.usersCount(),
+    groups: state.groupsCount(),
+    reconnects: reconnectAttempts + "/" + MAX_RECONNECT_ATTEMPTS,
+    session: SESSION_DIR,
+    nodeVersion: process.version,
+    battery: "🔋 (sur secteur recommandé)"
+  };
+}
 
-process.on(
-"uncaughtException",
-err=>{
+// ===============================
+// ANTI-CRASH
+// ===============================
 
- logger.error(
-  "Crash : "+
-  err.message
- );
-
- logger.error(
-  err.stack
- );
-
+process.on("uncaughtException", (err) => {
+  logger.error("💥 Crash: " + err.message);
 });
 
-
-
-process.on(
-"unhandledRejection",
-reason=>{
-
-
- logger.error(
-  "Erreur non gérée : "+
-  reason
- );
-
-
+process.on("unhandledRejection", (reason) => {
+  logger.error("⚠️ Erreur: " + reason);
 });
 
-
-
-
-
-
-
-
 // ===============================
-// SERVEUR WEB + BOT
+// DÉMARRAGE
 // ===============================
 
+(async () => {
+  showBanner();
 
-(async()=>{
+  try {
+    const app = createServer({
+      state,
+      commands,
+      requestPairingCode,
+      restart,
+      deleteSession,
+      getStatus
+    });
 
+    const PORT = process.env.PORT || 10000;
 
+    // Routes
+    app.get("/status", (req, res) => {
+      res.json(getStatus());
+    });
 
- try{
+    app.get("/ping", (req, res) => {
+      res.json({ alive: true, connected: state.connected });
+    });
 
+    // Interface simple pour Termux
+    app.get("/", (req, res) => {
+      res.send(`
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <style>
+            body { 
+              font-family: monospace; 
+              background: #1a1a2e; 
+              color: #e94560; 
+              padding: 20px;
+              text-align: center;
+            }
+            .card {
+              background: #16213e;
+              padding: 20px;
+              border-radius: 10px;
+              margin: 10px 0;
+            }
+            .online { color: #00ff88; }
+            .offline { color: #ff4444; }
+          </style>
+        </head>
+        <body>
+          <h1>🤖 AURA BOT</h1>
+          <div class="card">
+            <p>Statut: <span class="${state.connected ? 'online' : 'offline'}">
+              ${state.connected ? '✅ EN LIGNE' : '❌ HORS LIGNE'}
+            </span></p>
+            <p>📱 WhatsApp</p>
+          </div>
+        </body>
+        </html>
+      `);
+    });
 
+    app.listen(PORT, "0.0.0.0", () => {
+      logger.success("🌐 Interface: http://localhost:" + PORT);
+      logger.info("📊 Status: http://localhost:" + PORT + "/status");
+    });
 
-  logger.info(
-    "══════════════════════════════"
-  );
+    await startBot();
 
-
-  logger.info(
-    "🤖 AURA BOT - RENDER"
-  );
-
-
-  logger.info(
-    "══════════════════════════════"
-  );
-
-
-
-  const app =
-  createServer({
-
-   state,
-
-   commands,
-
-   requestPairingCode,
-
-   restart,
-
-   deleteSession
-
-  });
-
-
-
-  const PORT =
-  process.env.PORT ||
-  config.server.port ||
-  10000;
-
-
-
-
-  // Health check pour Render
-  app.get(
-    "/health",
-    (req,res)=>{
-
-
-      res.json({
-        status:"ok",
-        connected:state.connected,
-        uptime:process.uptime(),
-        memory:Math.round(
-          process.memoryUsage().heapUsed /
-          1024 /
-          1024
-        )+"MB",
-        timestamp:new Date().toISOString()
-      });
-
-
-    }
-  );
-
-
-
-
-  app.listen(
-    PORT,
-    "0.0.0.0",
-    ()=>{
-
-
-     logger.success(
-      "🌐 Serveur lancé sur "+PORT
-     );
-
-
-     logger.info(
-      "Health check : /health"
-     );
-
-
-    }
-
-  );
-
-
-
-
-
-  // Lance le socket WhatsApp
-  logger.info(
-    "Démarrage WhatsApp..."
-  );
-
-
-  await startBot();
-
-
-
- }catch(error){
-
-
-
-  logger.error(
-    "Erreur fatale : "+
-    error.message
-  );
-
-
-
- }
-
-
-
+  } catch (error) {
+    logger.error("💀 Erreur fatale: " + error.message);
+  }
 })();
 
-
-
-
 // ===============================
-// HEALTH CHECK AUTO
+// SURVEILLANCE
 // ===============================
 
-setInterval(
-  ()=>{
+setInterval(() => {
+  const mem = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+  const uptime = Math.floor(process.uptime() / 60);
 
+  logger.info(
+    "💓 " + uptime + "min | RAM: " + mem + "MB | " +
+    (state.connected ? "✅" : "❌")
+  );
 
-    const uptime =
-    process.uptime();
-
-
-    const memory =
-    Math.round(
-      process.memoryUsage().heapUsed /
-      1024 /
-      1024
-    );
-
-
-
-    logger.info(
-      "💓 Uptime: "+
-      Math.floor(uptime)+
-      "s | RAM: "+
-      memory+
-      "MB | WhatsApp: "+
-      (state.connected ? "✅" : "❌")
-    );
-
-
-
-    // Reconnexion auto si déconnecté
-    if(
-      !state.connected &&
-      !reconnecting &&
-      reconnectAttempts < MAX_RECONNECT_ATTEMPTS
-    ){
-
-
-      logger.warn(
-        "Tentative de reconnexion auto..."
-      );
-
-
-      startBot().catch(
-        err=>logger.error(
-          "Échec reconnexion : "+
-          err.message
-        )
-      );
-
-
-    }
-
-
-
-  },
-  5 * 60 * 1000
-);
+  if (!state.connected && !reconnecting && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+    logger.warn("⚠️ Reconnexion auto...");
+    startBot().catch(e => logger.error("❌ " + e.message));
+  }
+}, 5 * 60 * 1000);
