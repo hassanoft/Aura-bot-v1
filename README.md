@@ -136,22 +136,27 @@ Le fichier est chargé automatiquement au démarrage, aucune modification ailleu
 
 ---
 
-## ☁️ Déploiement
+## ☁️ Déploiement sur Render
 
-### Render (exécution du bot)
+Le bot **et** son interface web tournent ensemble sur Render : Express sert le dashboard (`web/`) et expose l'API sur le même service, à la même URL.
 
 1. Pousse le projet sur GitHub.
-2. Sur Render : **New → Web Service**, connecte le dépôt.
+2. Sur Render : **New → Web Service**, connecte le dépôt `AURA-BOT`.
 3. Render détecte `render.yaml` automatiquement (build : `npm install`, start : `npm start`).
-4. Renseigne les variables d'environnement (`OWNER_NUMBER`, `OWNER_NAME`, etc.) dans le dashboard Render.
-5. Le endpoint `/health` est utilisé par Render pour la surveillance automatique.
-6. Un disque persistant est monté sur `sessions/` pour conserver la connexion WhatsApp entre les redémarrages.
+4. Renseigne les variables d'environnement (`OWNER_NUMBER`, `OWNER_NAME`, etc.) dans l'onglet **Environment** du service.
+5. Lance le déploiement.
 
-### GitHub Pages (interface web uniquement)
+Une fois le déploiement terminé, Render fournit une URL du type :
 
-Le workflow `.github/workflows/deploy-pages.yml` déploie automatiquement le contenu de `web/` sur GitHub Pages à chaque push sur `main` touchant ce dossier. Ce site sert uniquement d'interface de démonstration : le bot réel tourne sur Render.
+```
+https://aura-bot.onrender.com
+```
 
-> ⚠️ GitHub Actions n'est **pas** utilisé pour maintenir le bot connecté en permanence — seul Render fait tourner le processus Node.js en continu.
+Ouvre ce lien : c'est le **dashboard AURA BOT**, avec le champ pour entrer ton numéro et générer le pairing code directement depuis le navigateur.
+
+Le endpoint `/health` est utilisé par Render pour la surveillance automatique du service.
+
+> ⚠️ Sur le plan gratuit Render, le système de fichiers n'est **pas persistant** entre les redéploiements : la session WhatsApp (`sessions/`) est perdue à chaque redéploiement, il faudra régénérer un pairing code. Pour conserver la session en continu, passe à un plan payant avec disque persistant et ajoute une section `disk` dans `render.yaml` pointant vers `./sessions`.
 
 ---
 
