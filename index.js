@@ -5,8 +5,8 @@ const pino = require("pino");
 const {
   default: makeWASocket,
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason
+  DisconnectReason,
+  makeCacheableSignalKeyStore
 } = require("@whiskeysockets/baileys");
 
 
@@ -30,6 +30,15 @@ const delay = ms =>
 new Promise(resolve =>
 setTimeout(resolve, ms)
 );
+
+
+
+// Version WhatsApp fixe pour Render
+const WA_VERSION = [
+  2,
+  3000,
+  1015901307
+];
 
 
 
@@ -66,6 +75,9 @@ let saveCreds = null;
 
 let reconnecting = false;
 let pairingRunning = false;
+let reconnectAttempts = 0;
+
+const MAX_RECONNECT_ATTEMPTS = 20;
 
 
 
@@ -80,6 +92,28 @@ async function startBot(){
   try{
 
 
+    // Vérifier trop de tentatives
+    if(reconnectAttempts >= MAX_RECONNECT_ATTEMPTS){
+
+
+      logger.error(
+        "Trop de tentatives de reconnexion"
+      );
+
+
+      logger.info(
+        "Processus maintenu pour health check Render"
+      );
+
+
+      return;
+
+
+    }
+
+
+
+
     if(!fs.existsSync(SESSION_DIR)){
 
       fs.mkdirSync(
@@ -87,6 +121,10 @@ async function startBot(){
         {
           recursive:true
         }
+      );
+
+      logger.info(
+        "Dossier session créé"
       );
 
     }
@@ -106,14 +144,30 @@ async function startBot(){
 
 
 
-    const {version} =
-    await fetchLatestBaileysVersion();
+    if(authState.creds.registered){
+
+
+      logger.success(
+        "Session existante trouvée"
+      );
+
+
+    }else{
+
+
+      logger.info(
+        "Nouvelle session - utilisez API pairing"
+      );
+
+
+    }
+
 
 
 
     logger.info(
       "Version WhatsApp : "+
-      version.join(".")
+      WA_VERSION.join(".")
     );
 
 
@@ -122,15 +176,21 @@ async function startBot(){
     sock =
     makeWASocket({
 
-      version,
+      version:WA_VERSION,
 
-      auth:authState,
+      auth:{
+        creds:authState.creds,
+        keys:makeCacheableSignalKeyStore(
+          authState.keys,
+          pino({level:"silent"})
+        )
+      },
 
 
       browser:[
         "AURA BOT",
         "Chrome",
-        "1.0.0"
+        "10.0.0"
       ],
 
 
@@ -142,13 +202,22 @@ async function startBot(){
       printQRInTerminal:false,
 
 
-      connectTimeoutMs:60000,
+      connectTimeoutMs:120000,
 
 
-      keepAliveIntervalMs:10000,
+      keepAliveIntervalMs:30000,
 
 
-      markOnlineOnConnect:false
+      markOnlineOnConnect:false,
+
+
+      defaultQueryTimeoutMs:60000,
+
+
+      syncFullHistory:false,
+
+
+      retryRequestDelayMs:10000
 
     });
 
@@ -235,9 +304,26 @@ async function startBot(){
           new Date();
 
 
+          reconnectAttempts = 0;
+
+
+          reconnecting = false;
+
+
+
+          const botNumber =
+          sock.user?.id?.split(":")[0] ||
+          "Inconnu";
+
+
 
           logger.success(
             "✅ WhatsApp connecté"
+          );
+
+
+          logger.info(
+            "Numéro : "+botNumber
           );
 
 
@@ -266,30 +352,102 @@ async function startBot(){
 
 
 
+          const erreur =
+          lastDisconnect
+          ?.error
+          ?.message ||
+          "Inconnue";
+
+
+
           logger.warn(
-            "Connexion fermée : "+
+            "Déconnecté - Code: "+
             code
+          );
+
+
+          logger.warn(
+            "Raison: "+erreur
           );
 
 
 
 
 
+          // Si loggedOut
           if(
-            code !== DisconnectReason.loggedOut &&
-            !reconnecting
+            code === DisconnectReason.loggedOut
+          ){
+
+
+            logger.error(
+              "Session invalide - loggedOut"
+            );
+
+
+            deleteSession();
+
+
+            reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+
+
+            return;
+
+
+          }
+
+
+
+
+
+          // Reconnexion automatique
+          if(
+            !reconnecting &&
+            reconnectAttempts < MAX_RECONNECT_ATTEMPTS
           ){
 
 
             reconnecting=true;
 
 
-
-            await delay(5000);
-
+            reconnectAttempts++;
 
 
-            reconnecting=false;
+
+            const waitTime =
+            Math.min(
+              5000 * reconnectAttempts,
+              30000
+            );
+
+
+
+            logger.info(
+              "Reconnexion "+
+              reconnectAttempts+
+              "/"+
+              MAX_RECONNECT_ATTEMPTS+
+              " dans "+
+              waitTime/1000+
+              "s..."
+            );
+
+
+
+            await delay(waitTime);
+
+
+
+            try{
+              sock?.end();
+            }catch(e){}
+
+
+
+            sock = null;
+
+
+            reconnecting = false;
 
 
 
@@ -328,10 +486,16 @@ async function startBot(){
 
 
 
-    await delay(5000);
+    await delay(10000);
 
 
-    return startBot();
+    if(!reconnecting){
+
+
+      return startBot();
+
+
+    }
 
 
 
@@ -377,23 +541,11 @@ async function requestPairingCode(number){
 
 
 
-    if(!sock){
-
-
-      await startBot();
-
-
-    }
-
-
-
-
-
-    if(authState.creds.registered){
+    if(phone.length < 10){
 
 
       throw new Error(
-        "Cette session est déjà connectée"
+        "Numéro de téléphone invalide"
       );
 
 
@@ -402,15 +554,100 @@ async function requestPairingCode(number){
 
 
 
-
     logger.info(
-      "Préparation du code pairing..."
+      "Demande pairing pour : "+phone
     );
 
 
 
 
-    await delay(10000);
+    if(!sock){
+
+
+      logger.info(
+        "Initialisation du socket..."
+      );
+
+
+      await startBot();
+
+
+
+      // Attendre que le socket soit prêt
+      let tentatives = 0;
+
+
+      while(
+        (!sock || !authState) &&
+        tentatives < 30
+      ){
+
+
+        await delay(2000);
+
+
+        tentatives++;
+
+
+        logger.info(
+          "Attente... ("+
+          tentatives+
+          "/30)"
+        );
+
+
+      }
+
+
+
+      if(!sock || !authState){
+
+
+        throw new Error(
+          "Impossible d'initialiser le socket"
+        );
+
+
+      }
+
+
+
+    }
+
+
+
+
+
+    if(authState?.creds?.registered){
+
+
+      logger.warn(
+        "Session déjà connectée"
+      );
+
+
+
+      return{
+        success:true,
+        message:"Session déjà connectée",
+        alreadyConnected:true
+      };
+
+
+    }
+
+
+
+
+
+    await delay(3000);
+
+
+
+
+    logger.info(
+      "Demande du code pairing..."
+    );
 
 
 
@@ -424,17 +661,56 @@ async function requestPairingCode(number){
 
 
 
+    const formattedCode =
+    code?.match(/.{1,4}/g)?.join("-") ||
+    code;
+
 
 
 
     logger.success(
-      "Code pairing : "+code
+      "══════════════════════════════"
+    );
+
+
+    logger.success(
+      "📲 CODE PAIRING : "+formattedCode
+    );
+
+
+    logger.success(
+      "══════════════════════════════"
+    );
+
+
+    logger.info(
+      "1. WhatsApp > Appareils connectés"
+    );
+
+
+    logger.info(
+      "2. Lier un appareil"
+    );
+
+
+    logger.info(
+      "3. Entrez le code"
+    );
+
+
+    logger.info(
+      "⏰ Code expire dans 2 minutes"
     );
 
 
 
 
-    return code;
+    return{
+      success:true,
+      code:code,
+      formattedCode:formattedCode,
+      phone:phone
+    };
 
 
 
@@ -504,8 +780,14 @@ async function restart(){
   sock=null;
 
 
+  reconnecting=false;
 
-  await delay(2000);
+
+  reconnectAttempts=0;
+
+
+
+  await delay(3000);
 
 
 
@@ -528,39 +810,68 @@ function deleteSession(){
 
 
 
-  if(fs.existsSync(SESSION_DIR)){
+  logger.warn(
+    "Suppression session..."
+  );
 
 
-    fs.rmSync(
+
+  try{
+
+
+    if(fs.existsSync(SESSION_DIR)){
+
+
+      fs.rmSync(
+        SESSION_DIR,
+        {
+          recursive:true,
+          force:true
+        }
+      );
+
+
+    }
+
+
+
+
+    fs.mkdirSync(
       SESSION_DIR,
       {
-        recursive:true,
-        force:true
+        recursive:true
       }
+    );
+
+
+
+    state.connected=false;
+
+
+    sock=null;
+
+
+    authState=null;
+
+
+
+    logger.success(
+      "Session supprimée"
+    );
+
+
+
+  }catch(error){
+
+
+    logger.error(
+      "Erreur suppression : "+
+      error.message
     );
 
 
   }
 
-
-
-
-  fs.mkdirSync(
-    SESSION_DIR,
-    {
-      recursive:true
-    }
-  );
-
-
-
-  state.connected=false;
-
-
-
-  logger.warn(
-    "Session supprimée"
-  );
 
 
 }
@@ -584,18 +895,22 @@ err=>{
   err.message
  );
 
+ logger.error(
+  err.stack
+ );
+
 });
 
 
 
 process.on(
 "unhandledRejection",
-err=>{
+reason=>{
 
 
  logger.error(
-  "Erreur Promise : "+
-  err
+  "Erreur non gérée : "+
+  reason
  );
 
 
@@ -609,7 +924,7 @@ err=>{
 
 
 // ===============================
-// SERVEUR WEB
+// SERVEUR WEB + BOT
 // ===============================
 
 
@@ -617,48 +932,187 @@ err=>{
 
 
 
- const app =
- createServer({
-
-  state,
-
-  commands,
-
-  requestPairingCode,
-
-  restart,
-
-  deleteSession
-
- });
+ try{
 
 
 
+  logger.info(
+    "══════════════════════════════"
+  );
 
 
- app.listen(
-  config.server.port,
-  ()=>{
+  logger.info(
+    "🤖 AURA BOT - RENDER"
+  );
 
 
-   logger.success(
-    "🌐 Serveur lancé sur "+
-    config.server.port
-   );
-
-
-  }
-
- );
+  logger.info(
+    "══════════════════════════════"
+  );
 
 
 
+  const app =
+  createServer({
+
+   state,
+
+   commands,
+
+   requestPairingCode,
+
+   restart,
+
+   deleteSession
+
+  });
 
 
- // Lance le socket même sans session
 
- await startBot();
+  const PORT =
+  process.env.PORT ||
+  config.server.port ||
+  10000;
+
+
+
+
+  // Health check pour Render
+  app.get(
+    "/health",
+    (req,res)=>{
+
+
+      res.json({
+        status:"ok",
+        connected:state.connected,
+        uptime:process.uptime(),
+        memory:Math.round(
+          process.memoryUsage().heapUsed /
+          1024 /
+          1024
+        )+"MB",
+        timestamp:new Date().toISOString()
+      });
+
+
+    }
+  );
+
+
+
+
+  app.listen(
+    PORT,
+    "0.0.0.0",
+    ()=>{
+
+
+     logger.success(
+      "🌐 Serveur lancé sur "+PORT
+     );
+
+
+     logger.info(
+      "Health check : /health"
+     );
+
+
+    }
+
+  );
+
+
+
+
+
+  // Lance le socket WhatsApp
+  logger.info(
+    "Démarrage WhatsApp..."
+  );
+
+
+  await startBot();
+
+
+
+ }catch(error){
+
+
+
+  logger.error(
+    "Erreur fatale : "+
+    error.message
+  );
+
+
+
+ }
 
 
 
 })();
+
+
+
+
+// ===============================
+// HEALTH CHECK AUTO
+// ===============================
+
+setInterval(
+  ()=>{
+
+
+    const uptime =
+    process.uptime();
+
+
+    const memory =
+    Math.round(
+      process.memoryUsage().heapUsed /
+      1024 /
+      1024
+    );
+
+
+
+    logger.info(
+      "💓 Uptime: "+
+      Math.floor(uptime)+
+      "s | RAM: "+
+      memory+
+      "MB | WhatsApp: "+
+      (state.connected ? "✅" : "❌")
+    );
+
+
+
+    // Reconnexion auto si déconnecté
+    if(
+      !state.connected &&
+      !reconnecting &&
+      reconnectAttempts < MAX_RECONNECT_ATTEMPTS
+    ){
+
+
+      logger.warn(
+        "Tentative de reconnexion auto..."
+      );
+
+
+      startBot().catch(
+        err=>logger.error(
+          "Échec reconnexion : "+
+          err.message
+        )
+      );
+
+
+    }
+
+
+
+  },
+  5 * 60 * 1000
+);
