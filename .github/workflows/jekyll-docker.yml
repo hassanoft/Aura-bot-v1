@@ -1,0 +1,50 @@
+name: Déploiement interface web (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Build du site Jekyll
+        run: |
+          docker run \
+          -v ${{ github.workspace }}/web:/srv/jekyll \
+          -v ${{ github.workspace }}/_site:/srv/jekyll/_site \
+          jekyll/builder:latest /bin/bash -c "chmod -R 777 /srv/jekyll && jekyll build --future"
+
+      - name: Configuration de GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload de l'artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Déploiement sur GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
