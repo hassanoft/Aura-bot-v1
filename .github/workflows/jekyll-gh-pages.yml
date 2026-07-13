@@ -28,8 +28,6 @@ jobs:
 
       - name: Configuration de GitHub Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Upload du dossier web/
         uses: actions/upload-pages-artifact@v3
