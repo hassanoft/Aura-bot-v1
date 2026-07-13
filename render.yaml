@@ -17,7 +17,3 @@ services:
         sync: false
       - key: OWNER_NAME
         sync: false
-    disk:
-      name: aura-bot-data
-      mountPath: /opt/render/project/src/sessions
-      sizeGB: 1
